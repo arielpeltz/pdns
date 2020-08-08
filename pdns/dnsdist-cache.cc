@@ -204,6 +204,7 @@ void DNSDistPacketCache::insert(uint32_t key, const boost::optional<Netmask>& su
 bool DNSDistPacketCache::get(uint32_t key)
 {
   uint32_t shardIndex = getShardIndex(key);
+  time_t now = time(nullptr);
   auto& shard = d_shards.at(shardIndex);
   auto& map = shard.d_map;
   {
@@ -220,6 +221,10 @@ bool DNSDistPacketCache::get(uint32_t key)
     const CacheValue& value = it->second;
 
     if (value.len < sizeof(dnsheader)) {
+      return false;
+    }
+
+    if(value.validity <= now){
       return false;
     }
     return true;

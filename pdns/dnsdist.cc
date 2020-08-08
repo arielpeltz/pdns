@@ -1378,13 +1378,14 @@ static void processUDPQuery(ClientState& cs, LocalHolders& holders, const struct
 #endif /* defined(HAVE_RECVMMSG) && defined(HAVE_SENDMMSG) && defined(MSG_WAITFORONE) */
       /* we use dest, always, because we don't want to use the listening address to send a response since it could be 0.0.0.0 */
       sendUDPResponse(cs.udpFD, reinterpret_cast<char*>(dq.dh), dq.len, dq.delayMsec, dest, *dq.remote);
+      memcpy(query, queryBackup, len);
+      delete queryBackup;
     }
 
     if(*cachedValidTime > static_cast<time_t>(dq.packetCache->get_recacheTTL()) || !ss){
       return;
     }
 
-    memcpy(query, queryBackup, len);
     sendToBackend = sendBackendCheck(dq, cs, holders, ss);
 
     if (!sendToBackend) {
