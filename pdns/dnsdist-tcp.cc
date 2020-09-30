@@ -897,7 +897,7 @@ static void handleQuery(std::shared_ptr<IncomingTCPConnectionState>& state, stru
   gettime(&queryRealTime, true);
 
   auto query = reinterpret_cast<char*>(&state->d_buffer.at(0));
-  time_t* cachedValidTime = new time_t(-1);
+  time_t cachedValidTime = time_t(-1);
   char* queryBackup = new char[state->d_querySize];
   uint32_t len = state->d_querySize;
   memcpy(queryBackup, query, state->d_querySize);
@@ -930,7 +930,7 @@ static void handleQuery(std::shared_ptr<IncomingTCPConnectionState>& state, stru
   }
 
   state->d_ds.reset();
-  replyTCP = sendReplyCheck(dq, *state->d_ci.cs, state->d_threadData.holders, state->d_ds, cachedValidTime);
+  replyTCP = sendReplyCheck(dq, *state->d_ci.cs, state->d_threadData.holders, state->d_ds, &cachedValidTime);
 
   if (replyTCP) {
     state->d_selfGeneratedResponse = true;
@@ -940,7 +940,7 @@ static void handleQuery(std::shared_ptr<IncomingTCPConnectionState>& state, stru
     sendResponse(state, now);
   }
 
-  if(*cachedValidTime > static_cast<time_t>(dq.packetCache->get_recacheTTL())){
+  if(cachedValidTime > static_cast<time_t>(dq.packetCache->get_recacheTTL())){
     return;
   }
 
@@ -950,6 +950,7 @@ static void handleQuery(std::shared_ptr<IncomingTCPConnectionState>& state, stru
 
   dq.len = len;
   state->d_buffer  = vector<uint8_t>(queryBackup, queryBackup+len);
+  delete queryBackup;
   sendToBackend = sendBackendCheck(dq, *state->d_ci.cs, state->d_threadData.holders, state->d_ds);
 
   if (!sendToBackend) {

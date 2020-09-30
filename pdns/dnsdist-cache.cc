@@ -201,7 +201,7 @@ void DNSDistPacketCache::insert(uint32_t key, const boost::optional<Netmask>& su
   }
 }
 
-bool DNSDistPacketCache::get(uint32_t key)
+bool DNSDistPacketCache::checkValidKey(uint32_t key)
 {
   uint32_t shardIndex = getShardIndex(key);
   time_t now = time(nullptr);

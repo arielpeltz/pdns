@@ -481,7 +481,7 @@ bool processResponse(char** response, uint16_t* responseLen, size_t* responseSiz
     // if zeroScope, pass the pre-ECS hash-key and do not pass the subnet to the cache
     
 
-    sendReponse = !(dr.packetCache->get(zeroScope ? dr.cacheKeyNoECS : dr.cacheKey));
+    sendReponse = !(dr.packetCache->checkValidKey(zeroScope ? dr.cacheKeyNoECS : dr.cacheKey));
     dr.packetCache->insert(zeroScope ? dr.cacheKeyNoECS : dr.cacheKey, zeroScope ? boost::none : dr.subnet, dr.origFlags, dr.dnssecOK, *dr.qname, dr.qtype, dr.qclass, *response, *responseLen, dr.tcp, dr.dh->rcode, dr.tempFailureTTL);
   }
 
@@ -601,7 +601,7 @@ void responderThread(std::shared_ptr<DownstreamState> dss){
             continue;
           }
 
-          bool isDoH = du != nullptr;
+          bool isDoH = du != nullptr;   
           /* atomically mark the state as available, but only if it has not been altered
             in the meantime */
           if (ids->tryMarkUnused(usageIndicator)) {
@@ -1327,7 +1327,7 @@ static void processUDPQuery(ClientState& cs, LocalHolders& holders, const struct
 {
   assert(responsesVect == nullptr || (queuedResponses != nullptr && respIOV != nullptr && respCBuf != nullptr));
   uint16_t queryId = 0;
-  time_t* cachedValidTime = new time_t(-1);
+  time_t cachedValidTime = time_t(-1);
   char* queryBackup = new char[len];
   memcpy(queryBackup, query, len);
 
@@ -1366,7 +1366,7 @@ static void processUDPQuery(ClientState& cs, LocalHolders& holders, const struct
     dq.dnsCryptQuery = std::move(dnsCryptQuery);
     std::shared_ptr<DownstreamState> ss{nullptr};
 
-    replyUdp = sendReplyCheck(dq, cs, holders, ss, cachedValidTime);
+    replyUdp = sendReplyCheck(dq, cs, holders, ss, &cachedValidTime);
 
     if (replyUdp) {
 #if defined(HAVE_RECVMMSG) && defined(HAVE_SENDMMSG) && defined(MSG_WAITFORONE)
@@ -1379,10 +1379,10 @@ static void processUDPQuery(ClientState& cs, LocalHolders& holders, const struct
       /* we use dest, always, because we don't want to use the listening address to send a response since it could be 0.0.0.0 */
       sendUDPResponse(cs.udpFD, reinterpret_cast<char*>(dq.dh), dq.len, dq.delayMsec, dest, *dq.remote);
       memcpy(query, queryBackup, len);
-      delete queryBackup;
     }
+    delete queryBackup;
 
-    if(*cachedValidTime > static_cast<time_t>(dq.packetCache->get_recacheTTL()) || !ss){
+    if(cachedValidTime > static_cast<time_t>(dq.packetCache->get_recacheTTL()) || !ss){
       return;
     }
 

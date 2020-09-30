@@ -37,7 +37,7 @@ public:
 
   void insert(uint32_t key, const boost::optional<Netmask>& subnet, uint16_t queryFlags, bool dnssecOK, const DNSName& qname, uint16_t qtype, uint16_t qclass, const char* response, uint16_t responseLen, bool tcp, uint8_t rcode, boost::optional<uint32_t> tempFailureTTL);
   bool get(const DNSQuestion& dq, uint16_t consumed, uint16_t queryId, char* response, uint16_t* responseLen, uint32_t* keyOut, boost::optional<Netmask>& subnetOut, bool dnssecOK, uint32_t allowExpired=0, bool skipAging=false, time_t* cacheValidTime=nullptr);
-  bool get(uint32_t key);
+  bool checkValidKey(uint32_t key);
   size_t purgeExpired(size_t upTo=0);
   size_t expunge(size_t upTo=0);
   size_t expungeByName(const DNSName& name, uint16_t qtype=QType::ANY, bool suffixMatch=false);
