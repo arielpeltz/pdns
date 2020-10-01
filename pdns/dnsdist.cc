@@ -456,6 +456,9 @@ static bool applyRulesToResponse(LocalStateHolder<vector<DNSDistResponseRuleActi
 
 bool processResponse(char** response, uint16_t* responseLen, size_t* responseSize, LocalStateHolder<vector<DNSDistResponseRuleAction> >& localRespRulactions, DNSResponse& dr, size_t addRoom, std::vector<uint8_t>& rewrittenResponse, bool muted)
 {
+
+  bool sendReponse = true;
+
   if (!applyRulesToResponse(localRespRulactions, dr)) {
     return false;
   }
@@ -478,6 +481,9 @@ bool processResponse(char** response, uint16_t* responseLen, size_t* responseSiz
       zeroScope = false;
     }
     // if zeroScope, pass the pre-ECS hash-key and do not pass the subnet to the cache
+    
+
+    sendReponse = !(dr.packetCache->checkValidKey(zeroScope ? dr.cacheKeyNoECS : dr.cacheKey));
     dr.packetCache->insert(zeroScope ? dr.cacheKeyNoECS : dr.cacheKey, zeroScope ? boost::none : dr.subnet, dr.origFlags, dr.dnssecOK, *dr.qname, dr.qtype, dr.qclass, *response, *responseLen, dr.tcp, dr.dh->rcode, dr.tempFailureTTL);
   }
 
@@ -489,7 +495,7 @@ bool processResponse(char** response, uint16_t* responseLen, size_t* responseSiz
   }
 #endif /* HAVE_DNSCRYPT */
 
-  return true;
+  return sendReponse;
 }
 
 static bool sendUDPResponse(int origFD, const char* response, const uint16_t responseLen, const int delayMsec, const ComboAddress& origDest, const ComboAddress& origRemote)
@@ -536,7 +542,6 @@ static void pickBackendSocketsReadyForReceiving(const std::shared_ptr<Downstream
   }
 }
 
-// listens on a dedicated socket, lobs answers from downstream servers to original requestors
 void responderThread(std::shared_ptr<DownstreamState> dss)
 try {
   setThreadName("dnsdist/respond");
@@ -1160,9 +1165,9 @@ static bool prepareOutgoingResponse(LocalHolders& holders, ClientState& cs, DNSQ
   return true;
 }
 
-ProcessQueryResult processQuery(DNSQuestion& dq, ClientState& cs, LocalHolders& holders, std::shared_ptr<DownstreamState>& selectedBackend)
-{
+bool sendReplyCheck(DNSQuestion& dq, ClientState& cs, LocalHolders& holders, std::shared_ptr<DownstreamState>& selectedBackend, time_t* cacheValidTime){
   const uint16_t queryId = ntohs(dq.dh->id);
+  
 
   try {
     /* we need an accurate ("real") value for the response and
@@ -1172,21 +1177,23 @@ ProcessQueryResult processQuery(DNSQuestion& dq, ClientState& cs, LocalHolders& 
     gettime(&now);
 
     if (!applyRulesToQuery(holders, dq, now)) {
-      return ProcessQueryResult::Drop;
+      return false;
     }
 
     if(dq.dh->qr) { // something turned it into a response
       fixUpQueryTurnedResponse(dq, dq.origFlags);
 
       if (!prepareOutgoingResponse(holders, cs, dq, false)) {
-        return ProcessQueryResult::Drop;
+        return false;
       }
 
       ++g_stats.selfAnswered;
       ++cs.responses;
-      return ProcessQueryResult::SendAnswer;
+      return true;
     }
 
+
+    //  Get pool corresponding to the packet
     std::shared_ptr<ServerPool> serverPool = getPool(*holders.pools, dq.poolname);
     dq.packetCache = serverPool->packetCache;
     auto policy = *(holders.policy);
@@ -1208,37 +1215,31 @@ ProcessQueryResult processQuery(DNSQuestion& dq, ClientState& cs, LocalHolders& 
       // we need ECS parsing (parseECS) to be true so we can be sure that the initial incoming query did not have an existing
       // ECS option, which would make it unsuitable for the zero-scope feature.
       if (dq.packetCache && !dq.skipCache && (!selectedBackend || !selectedBackend->disableZeroScope) && dq.packetCache->isECSParsingEnabled()) {
-        if (dq.packetCache->get(dq, dq.consumed, dq.dh->id, reinterpret_cast<char*>(dq.dh), &cachedResponseSize, &dq.cacheKeyNoECS, dq.subnet, dq.dnssecOK, allowExpired)) {
+        if (dq.packetCache->get(dq, dq.consumed, dq.dh->id, reinterpret_cast<char*>(dq.dh), &cachedResponseSize, &dq.cacheKeyNoECS, dq.subnet, dq.dnssecOK, allowExpired, false, cacheValidTime)) {
           dq.len = cachedResponseSize;
 
           if (!prepareOutgoingResponse(holders, cs, dq, true)) {
-            return ProcessQueryResult::Drop;
+            return false;
           }
 
-          return ProcessQueryResult::SendAnswer;
-        }
-
-        if (!dq.subnet) {
-          /* there was no existing ECS on the query, enable the zero-scope feature */
-          dq.useZeroScope = true;
+          return true;
         }
       }
 
       if (!handleEDNSClientSubnet(dq, dq.ednsAdded, dq.ecsAdded, g_preserveTrailingData)) {
         vinfolog("Dropping query from %s because we couldn't insert the ECS value", dq.remote->toStringWithPort());
-        return ProcessQueryResult::Drop;
+        return false;
       }
     }
 
     if (dq.packetCache && !dq.skipCache) {
-      if (dq.packetCache->get(dq, dq.consumed, dq.dh->id, reinterpret_cast<char*>(dq.dh), &cachedResponseSize, &dq.cacheKey, dq.subnet, dq.dnssecOK, allowExpired)) {
+      if (dq.packetCache->get(dq, dq.consumed, dq.dh->id, reinterpret_cast<char*>(dq.dh), &cachedResponseSize, &dq.cacheKey, dq.subnet, dq.dnssecOK, allowExpired, false, cacheValidTime)) {
         dq.len = cachedResponseSize;
 
         if (!prepareOutgoingResponse(holders, cs, dq, true)) {
-          return ProcessQueryResult::Drop;
+          return false;
         }
-
-        return ProcessQueryResult::SendAnswer;
+        return true;
       }
       ++g_stats.cacheMisses;
     }
@@ -1254,13 +1255,59 @@ ProcessQueryResult processQuery(DNSQuestion& dq, ClientState& cs, LocalHolders& 
         dq.dh->qr = true;
 
         if (!prepareOutgoingResponse(holders, cs, dq, false)) {
-          return ProcessQueryResult::Drop;
+          return false;
         }
         // no response-only statistics counter to update.
-        return ProcessQueryResult::SendAnswer;
+        return true;
       }
 
-      return ProcessQueryResult::Drop;
+      return false;
+    }
+
+  }
+  catch(const std::exception& e){
+    vinfolog("Got an error while parsing a %s query from %s, id %d: %s", (dq.tcp ? "TCP" : "UDP"), dq.remote->toStringWithPort(), queryId, e.what());
+  }
+  return false;
+}
+
+bool sendBackendCheck(DNSQuestion& dq, ClientState& cs, LocalHolders& holders, std::shared_ptr<DownstreamState>& selectedBackend)
+{
+  const uint16_t queryId = ntohs(dq.dh->id);
+
+  try {
+    /* we need an accurate ("real") value for the response and
+       to store into the IDS, but not for insertion into the
+       rings for example */
+    struct timespec now;
+    gettime(&now);
+
+    if (!applyRulesToQuery(holders, dq, now)) {
+      return false;
+    }
+
+    std::shared_ptr<ServerPool> serverPool = getPool(*holders.pools, dq.poolname);
+    dq.packetCache = serverPool->packetCache;
+
+    uint16_t cachedResponseSize = dq.size;
+    uint32_t allowExpired = selectedBackend ? 0 : g_staleCacheEntriesTTL;
+
+    if (dq.packetCache && !dq.skipCache) {
+      dq.dnssecOK = (getEDNSZ(dq) & EDNS_HEADER_FLAG_DO);
+    }
+
+    if (dq.useECS && ((selectedBackend && selectedBackend->useECS) || (!selectedBackend && serverPool->getECS()))) {
+      // we special case our cache in case a downstream explicitly gave us a universally valid response with a 0 scope
+      // we need ECS parsing (parseECS) to be true so we can be sure that the initial incoming query did not have an existing
+      // ECS option, which would make it unsuitable for the zero-scope feature.
+      if (dq.packetCache && !dq.skipCache && !selectedBackend->disableZeroScope && dq.packetCache->isECSParsingEnabled()) {
+        if (!dq.packetCache->get(dq, dq.consumed, dq.dh->id, reinterpret_cast<char*>(dq.dh), &cachedResponseSize, &dq.cacheKeyNoECS, dq.subnet, dq.dnssecOK, allowExpired, false, nullptr)) {
+          if (!dq.subnet) {
+            /* there was no existing ECS on the query, enable the zero-scope feature */
+            dq.useZeroScope = true;
+          }
+        }
+      }
     }
 
     if (dq.addXPF && selectedBackend->xpfRRCode != 0) {
@@ -1268,18 +1315,24 @@ ProcessQueryResult processQuery(DNSQuestion& dq, ClientState& cs, LocalHolders& 
     }
 
     selectedBackend->queries++;
-    return ProcessQueryResult::PassToBackend;
+    return true;
   }
   catch(const std::exception& e){
     vinfolog("Got an error while parsing a %s query from %s, id %d: %s", (dq.tcp ? "TCP" : "UDP"), dq.remote->toStringWithPort(), queryId, e.what());
   }
-  return ProcessQueryResult::Drop;
+  return false;
 }
 
 static void processUDPQuery(ClientState& cs, LocalHolders& holders, const struct msghdr* msgh, const ComboAddress& remote, ComboAddress& dest, char* query, uint16_t len, size_t queryBufferSize, struct mmsghdr* responsesVect, unsigned int* queuedResponses, struct iovec* respIOV, cmsgbuf_aligned* respCBuf)
 {
   assert(responsesVect == nullptr || (queuedResponses != nullptr && respIOV != nullptr && respCBuf != nullptr));
   uint16_t queryId = 0;
+  time_t cachedValidTime = time_t(-1);
+  char* queryBackup = new char[len];
+  memcpy(queryBackup, query, len);
+
+  bool sendToBackend;
+  bool replyUdp;
 
   try {
     if (!isUDPQueryAcceptable(cs, holders, msgh, remote, dest)) {
@@ -1312,13 +1365,10 @@ static void processUDPQuery(ClientState& cs, LocalHolders& holders, const struct
     DNSQuestion dq(&qname, qtype, qclass, consumed, dest.sin4.sin_family != 0 ? &dest : &cs.local, &remote, dh, queryBufferSize, len, false, &queryRealTime);
     dq.dnsCryptQuery = std::move(dnsCryptQuery);
     std::shared_ptr<DownstreamState> ss{nullptr};
-    auto result = processQuery(dq, cs, holders, ss);
 
-    if (result == ProcessQueryResult::Drop) {
-      return;
-    }
+    replyUdp = sendReplyCheck(dq, cs, holders, ss, &cachedValidTime);
 
-    if (result == ProcessQueryResult::SendAnswer) {
+    if (replyUdp) {
 #if defined(HAVE_RECVMMSG) && defined(HAVE_SENDMMSG) && defined(MSG_WAITFORONE)
       if (dq.delayMsec == 0 && responsesVect != nullptr) {
         queueResponse(cs, reinterpret_cast<char*>(dq.dh), dq.len, *dq.local, *dq.remote, responsesVect[*queuedResponses], respIOV, respCBuf);
@@ -1328,10 +1378,17 @@ static void processUDPQuery(ClientState& cs, LocalHolders& holders, const struct
 #endif /* defined(HAVE_RECVMMSG) && defined(HAVE_SENDMMSG) && defined(MSG_WAITFORONE) */
       /* we use dest, always, because we don't want to use the listening address to send a response since it could be 0.0.0.0 */
       sendUDPResponse(cs.udpFD, reinterpret_cast<char*>(dq.dh), dq.len, dq.delayMsec, dest, *dq.remote);
+      memcpy(query, queryBackup, len);
+    }
+    delete queryBackup;
+
+    if(cachedValidTime > static_cast<time_t>(dq.packetCache->get_recacheTTL()) || !ss){
       return;
     }
 
-    if (result != ProcessQueryResult::PassToBackend || ss == nullptr) {
+    sendToBackend = sendBackendCheck(dq, cs, holders, ss);
+
+    if (!sendToBackend) {
       return;
     }
 
@@ -2449,6 +2506,10 @@ catch(PDNSException &ae)
 }
 
 uint64_t getLatencyCount(const std::string&)
+{
+    return g_stats.responses + g_stats.selfAnswered + g_stats.cacheHits;
+}
+
 {
     return g_stats.responses + g_stats.selfAnswered + g_stats.cacheHits;
 }
